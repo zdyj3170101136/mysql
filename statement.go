@@ -9,11 +9,14 @@
 package mysql
 
 import (
+	"context"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"io"
 	"reflect"
+
+	"github.com/opentracing/opentracing-go"
 )
 
 type mysqlStmt struct {
@@ -94,33 +97,44 @@ func (stmt *mysqlStmt) Exec(args []driver.Value) (driver.Result, error) {
 }
 
 func (stmt *mysqlStmt) Query(args []driver.Value) (driver.Rows, error) {
-	return stmt.query(args)
+	return stmt.query(context.Background(), args)
 }
 
-func (stmt *mysqlStmt) query(args []driver.Value) (*binaryRows, error) {
+func (stmt *mysqlStmt) query(ctx context.Context, args []driver.Value) (*binaryRows, error) {
+	sp, ctx := opentracing.StartSpanFromContext(ctx, "stmt.query")
+	defer sp.Finish()
 	if stmt.mc.closed.Load() {
 		errLog.Print(ErrInvalidConn)
 		return nil, driver.ErrBadConn
 	}
+
+	sp, ctx = opentracing.StartSpanFromContext(ctx, "stmt.writeExecutePacket")
 	// Send command
 	err := stmt.writeExecutePacket(args)
 	if err != nil {
+		sp.Finish()
 		return nil, stmt.mc.markBadConn(err)
 	}
+	sp.Finish()
 
 	mc := stmt.mc
 
+	sp, ctx = opentracing.StartSpanFromContext(ctx, "stmt.readResultSetHeaderPacket")
 	// Read Result
 	resLen, err := mc.readResultSetHeaderPacket()
 	if err != nil {
+		sp.Finish()
 		return nil, err
 	}
+	sp.Finish()
 
 	rows := new(binaryRows)
 
 	if resLen > 0 {
 		rows.mc = mc
+		sp, ctx = opentracing.StartSpanFromContext(ctx, "stmt.readColumns")
 		rows.rs.columns, err = mc.readColumns(resLen)
+		sp.Finish()
 	} else {
 		rows.rs.done = true
 

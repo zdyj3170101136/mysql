@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/opentracing/opentracing-go"
 )
 
 type mysqlConn struct {
@@ -352,10 +354,12 @@ func (mc *mysqlConn) exec(query string) error {
 }
 
 func (mc *mysqlConn) Query(query string, args []driver.Value) (driver.Rows, error) {
-	return mc.query(query, args)
+	return mc.query(context.Background(), query, args)
 }
 
-func (mc *mysqlConn) query(query string, args []driver.Value) (*textRows, error) {
+func (mc *mysqlConn) query(ctx context.Context, query string, args []driver.Value) (*textRows, error) {
+	sp, ctx := opentracing.StartSpanFromContext(ctx, "query")
+	defer sp.Finish()
 	if mc.closed.Load() {
 		errLog.Print(ErrInvalidConn)
 		return nil, driver.ErrBadConn
@@ -372,11 +376,15 @@ func (mc *mysqlConn) query(query string, args []driver.Value) (*textRows, error)
 		query = prepared
 	}
 	// Send command
+	sp, ctx = opentracing.StartSpanFromContext(ctx, "writeCommandPacketStr")
 	err := mc.writeCommandPacketStr(comQuery, query)
+	sp.Finish()
 	if err == nil {
 		// Read Result
 		var resLen int
+		sp, ctx = opentracing.StartSpanFromContext(ctx, "readResultSetHeaderPacket")
 		resLen, err = mc.readResultSetHeaderPacket()
+		sp.Finish()
 		if err == nil {
 			rows := new(textRows)
 			rows.mc = mc
@@ -392,8 +400,10 @@ func (mc *mysqlConn) query(query string, args []driver.Value) (*textRows, error)
 				}
 			}
 
+			sp, ctx = opentracing.StartSpanFromContext(ctx, "readColumns")
 			// Columns
 			rows.rs.columns, err = mc.readColumns(resLen)
+			sp.Finish()
 			return rows, err
 		}
 	}
@@ -493,6 +503,8 @@ func (mc *mysqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver
 }
 
 func (mc *mysqlConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	sp, ctx := opentracing.StartSpanFromContext(ctx, "QueryContext")
+	defer sp.Finish()
 	dargs, err := namedValueToValue(args)
 	if err != nil {
 		return nil, err
@@ -502,7 +514,7 @@ func (mc *mysqlConn) QueryContext(ctx context.Context, query string, args []driv
 		return nil, err
 	}
 
-	rows, err := mc.query(query, dargs)
+	rows, err := mc.query(ctx, query, dargs)
 	if err != nil {
 		mc.finish()
 		return nil, err
@@ -546,6 +558,8 @@ func (mc *mysqlConn) PrepareContext(ctx context.Context, query string) (driver.S
 }
 
 func (stmt *mysqlStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	sp, ctx := opentracing.StartSpanFromContext(ctx, "stmt.QueryContext")
+	defer sp.Finish()
 	dargs, err := namedValueToValue(args)
 	if err != nil {
 		return nil, err
@@ -555,7 +569,7 @@ func (stmt *mysqlStmt) QueryContext(ctx context.Context, args []driver.NamedValu
 		return nil, err
 	}
 
-	rows, err := stmt.query(dargs)
+	rows, err := stmt.query(ctx, dargs)
 	if err != nil {
 		stmt.mc.finish()
 		return nil, err
